@@ -1,129 +1,71 @@
-import os
-import cv2 as cv
-from TTS.api import TTS
-import sounddevice as sd
-from face_recognition import FaceRecognizer
-from hand_detection import HandDetector
+import sys
+import cv2
+from PyQt5.QtWidgets import QApplication, QLabel, QWidget, QPushButton, QVBoxLayout, QHBoxLayout
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtCore import QTimer
 from Models import User
-from enum import Enum
-from capture import CaptureMulty as Capture
+from face_recognition import FaceRecognizer
+from machine import Main, States
 
-class States(Enum):
-    TRAINING = 0
-    RECOGNIZING = 1
-
-
-class Main:
-    SAMPLE_RATE = 20500
+class MainWindow(QWidget):
     def __init__(self):
-        self.cap = Capture(0)
-        self.model = FaceRecognizer(users=User.read_all_users())
-        self.hand_detector = HandDetector()
-        self.detected_users = []
-        self.state = States.TRAINING
-        self.tts = TTS(model_name="tts_models/en/ljspeech/vits", progress_bar=False, gpu=True)
+        super().__init__()
+        self.setWindowTitle("Face & Hand Recognition System")
 
-        self.enter_your_name = self.tts.tts("if you want to train, enter your name, else press enter")
-        self.press_button_train = self.tts.tts("press 't' to train, press 'Esc' to exit")
-        self.press_button_recognize = self.tts.tts("if you want training press 't', and if not, press 'Esc' to exit")
+        self.main = Main(FaceRecognizer(users=User.read_all_users()))
+        self.main.run = self.run_gui  # override
 
+        # UI Elements
+        self.image_label = QLabel()
+        self.start_button = QPushButton("Start Recognition")
+        self.train_button = QPushButton("Start Training")
 
-    def run(self, default_state=States.TRAINING):
-        self.state = default_state
-        self.machine()
+        # Layout
+        layout = QVBoxLayout()
+        layout.addWidget(self.image_label)
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.start_button)
+        buttons.addWidget(self.train_button)
+        layout.addLayout(buttons)
+        self.setLayout(layout)
 
-    def transition(self, next_state):
-        Main.clear_console()
-        print(f"transitioning from {self.state.name} to {next_state.name}")
-        self.state = next_state
+        # Signals
+        self.start_button.clicked.connect(lambda: self.main.transition(States.RECOGNIZING))
+        self.train_button.clicked.connect(lambda: self.main.transition(States.TRAINING))
 
-    def machine(self):
-        while True:
-            if self.state == States.TRAINING:
-                self.training()
-            elif self.state == States.RECOGNIZING:
-                self.recognizing()
+        # Timer
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(30)
 
-    def training(self):
+    def run_gui(self, default_state=States.TRAINING):
+        self.main.state = default_state
 
-        sd.play(self.enter_your_name, samplerate=Main.SAMPLE_RATE)
-        name = input("if you want to train, enter your name, else press enter: ")
+    def update_frame(self):
+        frame = self.main.cap.read()
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        if name == "":
-            self.transition(States.RECOGNIZING)
-            return
+        # جایگزینی بخش training و recognizing
+        if self.main.state == States.TRAINING:
+            # کدی مثل self.main.training() رو بازنویسی می‌کنیم
+            cv2.putText(frame, "Training mode - press T in terminal", (30, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
 
-
-        sd.play(self.press_button_train, samplerate=Main.SAMPLE_RATE)
-        print("press 't' to train, press 'Esc' to exit")
-
-        read = -1
-        while True:
-            frame = self.cap.read()
-            if read == 27:
-                self.transition(States.RECOGNIZING)
-                break
-
-            elif read == ord('t') or read == ord('T'):
-                self.model.train(user_id=name, image=frame)
-
-            cv.imshow("frame", frame)
-            read = cv.waitKey(1)
-
-
-    def recognizing(self):
-
-        sd.play(self.press_button_recognize, samplerate=Main.SAMPLE_RATE)
-        print("if you want training press 't', and if not, press 'Esc' to exit")
-
-        read = -1
-        while True:
-            frame = self.cap.read()
-            if read == 27:
-                quit()
-            elif read == ord('t') or read == ord('T'):
-                self.transition(States.TRAINING)
-                break
-
-            res = self.model.recognize(frame)
-            not_detected = [user[0] for user in res if not user[0] in self.detected_users and user[0] == "unknown"]
-            for user in not_detected:
-                if user == "unknown":
-                    continue
-                audio_array = self.tts.tts(f"hello {user}")
-                sd.play(audio_array, samplerate=Main.SAMPLE_RATE)
-
+        elif self.main.state == States.RECOGNIZING:
+            res = self.main.model.recognize(frame)
             for result in res:
-                if result[0] == "unknown":
-                    continue
-                panel_center = []
+                if result[0] != "unknown":
+                    x, y = result[2][0]
+                    cv2.putText(frame, f"Hello {result[0]}", (x, y - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-                face_center, face_width, face_height = result[2]
-
-                panel_center.append(int(face_center[0] + round(face_width * 1.5)))
-                panel_center.append(int(face_center[1] + round(face_height * 1.5)))
-
-                panel_first = (panel_center[0] - int(face_width * 1.4), panel_center[1] - face_height)
-                panel_second = (panel_center[0] + face_width, panel_center[1] + face_height)
-
-                cropped_panel = frame[panel_first[1]:panel_second[1], panel_first[0]:panel_second[0]]
-
-                cropped_panel = self.hand_detector.detect_hand(cropped_panel)
-
-                frame[panel_first[1]:panel_second[1], panel_first[0]:panel_second[0]] = cropped_panel
-                cv.rectangle(frame, panel_first, panel_second, (0, 0, 255), 2)
+        # نمایش فریم
+        h, w, ch = frame.shape
+        qimg = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
+        self.image_label.setPixmap(QPixmap.fromImage(qimg))
 
 
-            self.detected_users.extend(not_detected)
-
-            cv.imshow("frame", frame)
-            read = cv.waitKey(1)
-
-
-    @staticmethod
-    def clear_console():
-        os.system('cls' if os.name == 'nt' else 'clear')
-
-
-main = Main()
-main.run()
+app = QApplication(sys.argv)
+window = MainWindow()
+window.show()
+sys.exit(app.exec_())
